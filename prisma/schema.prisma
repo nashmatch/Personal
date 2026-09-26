@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Users ----------
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?  @unique
+  unitPref  String   @default("imperial") // "imperial" | "metric"
+  createdAt DateTime @default(now())
+
+  goals        Goal[]
+  mealLogs     MealLog[]
+  bodyMetrics  BodyMetric[]
+  workoutLogs  WorkoutLog[]
+  templates    WorkoutTemplate[]
+  mealPlans    MealPlan[]
+}
+
+// ---------- Goals ----------
+
+model Goal {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String // "NUTRITION" | "WEIGHT" | "STRENGTH" | "HABIT"
+  name      String
+  active    Boolean   @default(true)
+
+  // Nutrition goal fields
+  targetCalories Float?
+  targetProtein  Float?
+  targetCarbs    Float?
+  targetFat      Float?
+
+  // Weight goal fields
+  targetWeightKg Float?
+  startWeightKg  Float?
+  targetDate     DateTime?
+
+  // Strength goal fields
+  exerciseId        String?
+  exercise          Exercise? @relation(fields: [exerciseId], references: [id])
+  targetWeightForLift Float?
+  targetReps        Int?
+
+  // Habit goal fields (e.g. workouts per week)
+  targetPerWeek Int?
+
+  notes      String?
+  createdAt  DateTime  @default(now())
+  achievedAt DateTime?
+}
+
+// ---------- Nutrition: Foods & Recipes ----------
+
+model Food {
+  id             String   @id @default(cuid())
+  fdcId          Int?     @unique
+  name           String
+  brand          String?
+  source         String   @default("USDA") // "USDA" | "CUSTOM"
+  servingQty     Float    @default(1)
+  servingUnit    String   @default("serving")
+  gramsPerServing Float   @default(100)
+  calories       Float
+  proteinG       Float
+  carbsG         Float
+  fatG           Float
+  fiberG         Float?
+  sugarG         Float?
+  sodiumMg       Float?
+  createdAt      DateTime @default(now())
+
+  mealLogs          MealLog[]
+  recipeIngredients  RecipeIngredient[]
+
+  @@index([name])
+}
+
+model Recipe {
+  id                String   @id @default(cuid())
+  name              String
+  cuisine           String // e.g. "Italian", "Mexican", "Asian", "American", "Mediterranean", "Indian"
+  prepMinutes       Int
+  cookMinutes       Int      @default(0)
+  totalMinutes      Int
+  servings          Int      @default(1)
+  caloriesPerServing Float
+  proteinG          Float
+  carbsG            Float
+  fatG              Float
+  fiberG            Float?
+  tagsJson          String   @default("[]") // JSON array: ["high-protein","vegetarian","quick","low-carb",...]
+  instructions      String   // newline separated steps
+  imageEmoji        String   @default("🍽️")
+  createdAt         DateTime @default(now())
+
+  ingredients   RecipeIngredient[]
+  mealLogs      MealLog[]
+  planEntries   MealPlanEntry[]
+
+  @@index([cuisine])
+}
+
+model RecipeIngredient {
+  id        String  @id @default(cuid())
+  recipeId  String
+  recipe    Recipe  @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  foodId    String?
+  food      Food?   @relation(fields: [foodId], references: [id])
+  name      String
+  quantity  Float
+  unit      String
+}
+
+model MealLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date      DateTime // day of the log (time truncated to date at write time)
+  mealType  String // "BREAKFAST" | "LUNCH" | "DINNER" | "SNACK"
+
+  foodId    String?
+  food      Food?    @relation(fields: [foodId], references: [id])
+  recipeId  String?
+  recipe    Recipe?  @relation(fields: [recipeId], references: [id])
+
+  servings  Float    @default(1)
+
+  // Denormalized macro snapshot at time of logging
+  calories  Float
+  proteinG  Float
+  carbsG    Float
+  fatG      Float
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, date])
+}
+
+model MealPlan {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  days           Int      @default(1)
+  targetCalories Float
+  targetProtein  Float
+  targetCarbs    Float
+  targetFat      Float
+  cuisineFilter  String?
+  maxMinutes     Int?
+  createdAt      DateTime @default(now())
+
+  entries MealPlanEntry[]
+}
+
+model MealPlanEntry {
+  id         String   @id @default(cuid())
+  mealPlanId String
+  mealPlan   MealPlan @relation(fields: [mealPlanId], references: [id], onDelete: Cascade)
+  day        Int
+  mealType   String
+  recipeId   String
+  recipe     Recipe   @relation(fields: [recipeId], references: [id])
+  servings   Float    @default(1)
+}
+
+// ---------- Fitness: Exercises & Workouts ----------
+
+model Exercise {
+  id               String  @id @default(cuid())
+  name             String
+  category         String // "strength" | "cardio" | "stretching" | "plyometrics" | "olympic weightlifting"
+  equipment        String? // "barbell" | "dumbbell" | "bodyweight" | "machine" | "cable" | "kettlebell" | ...
+  primaryMuscles   String  // JSON array of muscle group names
+  secondaryMuscles String  @default("[]") // JSON array
+  force            String? // "push" | "pull" | "static"
+  level            String  @default("intermediate") // "beginner" | "intermediate" | "expert"
+  mechanic         String? // "compound" | "isolation"
+  instructions     String  // newline separated steps
+
+  goals             Goal[]
+  templateExercises WorkoutTemplateExercise[]
+  setLogs           SetLog[]
+
+  @@index([name])
+}
+
+model WorkoutTemplate {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  notes     String?
+  createdAt DateTime @default(now())
+
+  exercises   WorkoutTemplateExercise[]
+  workoutLogs WorkoutLog[]
+}
+
+model WorkoutTemplateExercise {
+  id          String          @id @default(cuid())
+  templateId  String
+  template    WorkoutTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  exerciseId  String
+  exercise    Exercise        @relation(fields: [exerciseId], references: [id])
+  order       Int             @default(0)
+  targetSets  Int             @default(3)
+  targetReps  Int             @default(10)
+  targetWeightKg Float?
+  restSeconds Int             @default(90)
+}
+
+model WorkoutLog {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  templateId      String?
+  template        WorkoutTemplate? @relation(fields: [templateId], references: [id])
+  name            String
+  date            DateTime
+  durationMinutes Int?
+  notes           String?
+  createdAt       DateTime         @default(now())
+
+  sets SetLog[]
+}
+
+model SetLog {
+  id            String     @id @default(cuid())
+  workoutLogId  String
+  workoutLog    WorkoutLog @relation(fields: [workoutLogId], references: [id], onDelete: Cascade)
+  exerciseId    String
+  exercise      Exercise   @relation(fields: [exerciseId], references: [id])
+  setNumber     Int
+  reps          Int
+  weightKg      Float      @default(0)
+  rpe           Float?
+  isWarmup      Boolean    @default(false)
+}
+
+model BodyMetric {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date         DateTime
+  weightKg     Float?
+  bodyFatPct   Float?
+  notes        String?
+
+  @@index([userId, date])
+}
