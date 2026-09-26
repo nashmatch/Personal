@@ -1,9 +1,11 @@
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 let cachedUserId: string | null = null;
 
-/** Single-user local app: fetches (or creates) the default profile. */
+/** Single-user app: fetches (or creates) the default profile. */
 export async function getCurrentUser() {
+  const prisma = await getPrisma();
+
   if (cachedUserId) {
     const existing = await prisma.user.findUnique({ where: { id: cachedUserId } });
     if (existing) return existing;

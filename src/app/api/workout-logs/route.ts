@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const take = Number(req.nextUrl.searchParams.get("take") ?? 30);
   const logs = await prisma.workoutLog.findMany({
@@ -15,6 +16,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const body = await req.json();
   const { name, date, templateId, durationMinutes, notes, sets } = body;
@@ -49,6 +51,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const prisma = await getPrisma();
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
   await prisma.workoutLog.delete({ where: { id } });

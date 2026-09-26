@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 import { stringify } from "csv-stringify/sync";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const type = req.nextUrl.searchParams.get("type") ?? "meals";
 

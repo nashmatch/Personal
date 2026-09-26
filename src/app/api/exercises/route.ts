@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const params = req.nextUrl.searchParams;
   const q = params.get("q");
   const category = params.get("category");

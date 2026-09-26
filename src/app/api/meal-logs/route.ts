@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 import { dayRange, todayKey } from "@/lib/date";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const date = req.nextUrl.searchParams.get("date") ?? todayKey();
   const logs = await prisma.mealLog.findMany({
@@ -15,6 +16,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const body = await req.json();
   const { date, mealType, foodId, recipeId, servings = 1 } = body;
@@ -62,6 +64,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const prisma = await getPrisma();
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
   await prisma.mealLog.delete({ where: { id } });

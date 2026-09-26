@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 import { subDays, format } from "date-fns";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const days = Number(req.nextUrl.searchParams.get("days") ?? 30);
   const since = subDays(new Date(), days);

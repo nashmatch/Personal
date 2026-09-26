@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 // Create (or reuse) a Food row — used both for custom foods and to persist
 // a food picked from the live USDA search before logging it.
 export async function POST(req: NextRequest) {
+  const prisma = await getPrisma();
   const body = await req.json();
   const {
     fdcId,

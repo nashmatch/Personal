@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 import { writeSheetTab, isSheetsConfigured } from "@/lib/sheets";
 
@@ -18,6 +18,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const { type } = await req.json();
 

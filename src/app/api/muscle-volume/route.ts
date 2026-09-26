@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/user";
 import { MUSCLE_GROUPS } from "@/lib/muscles";
 import { subDays } from "date-fns";
 
 export async function GET(req: NextRequest) {
+  const prisma = await getPrisma();
   const user = await getCurrentUser();
   const days = Number(req.nextUrl.searchParams.get("days") ?? 7);
   const since = subDays(new Date(), days);

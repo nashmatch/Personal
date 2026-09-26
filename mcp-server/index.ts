@@ -1,22 +1,73 @@
 #!/usr/bin/env node
 // MCP server exposing this app's nutrition + fitness data to Claude in plain language.
 // Run: npx tsx mcp-server/index.ts  (see README "Claude connector" section for client setup)
+//
+// This talks to the deployed app over HTTP (the same REST API the web UI
+// uses) rather than touching the database directly — once the app is
+// deployed to Cloudflare, its D1 database is only reachable from inside the
+// Worker, so this is the one channel available from a local MCP process.
+// Point it at your deployment with the FITFUL_API_URL env var.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { Prisma } from "@prisma/client";
-import { prisma } from "../src/lib/prisma";
-import { getCurrentUser } from "../src/lib/user";
-import { dayRange, todayKey } from "../src/lib/date";
-import { searchFdcFoods } from "../src/lib/fdc";
-import { generateMealPlan } from "../src/lib/mealPlanner";
 import { MUSCLE_GROUPS } from "../src/lib/muscles";
+
+const API_URL = (process.env.FITFUL_API_URL || "http://localhost:3000").replace(/\/$/, "");
 
 const server = new McpServer({ name: "fitful", version: "0.1.0" });
 
+interface FoodResult {
+  id?: string;
+  fdcId?: number;
+  name: string;
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+}
+
+interface ExerciseResult {
+  id: string;
+  name: string;
+  category: string;
+  equipment: string | null;
+  primaryMuscles: string[];
+}
+
+interface PlannedMealResult {
+  day: number;
+  mealType: string;
+  servings: number;
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  recipe: { name: string; cuisine: string; totalMinutes: number };
+}
+
 function text(payload: unknown) {
-  return { content: [{ type: "text" as const, text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) }] };
+  return {
+    content: [
+      { type: "text" as const, text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) },
+    ],
+  };
+}
+
+async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error ?? `Request to ${path} failed (${res.status})`);
+  }
+  return data;
+}
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 // ---------------- Nutrition ----------------
@@ -28,11 +79,8 @@ server.registerTool(
     inputSchema: { query: z.string().describe("Food name to search for, e.g. 'chicken breast'") },
   },
   async ({ query }) => {
-    const [local, remote] = await Promise.all([
-      prisma.food.findMany({ where: { name: { contains: query } }, take: 8 }),
-      searchFdcFoods(query, 5),
-    ]);
-    return text({ local, remote });
+    const data = await api(`/api/foods/search?q=${encodeURIComponent(query)}`);
+    return text(data);
   },
 );
 
@@ -49,52 +97,36 @@ server.registerTool(
     },
   },
   async ({ foodQuery, mealType, servings, date }) => {
-    const user = await getCurrentUser();
     const day = date ?? todayKey();
+    const search = await api<{ local: FoodResult[]; remote: FoodResult[] }>(
+      `/api/foods/search?q=${encodeURIComponent(foodQuery)}`,
+    );
 
-    let food = await prisma.food.findFirst({ where: { name: { contains: foodQuery } } });
-    if (!food) {
-      const remote = await searchFdcFoods(foodQuery, 1);
-      if (remote.length === 0) {
-        return text(`No food found matching "${foodQuery}". Try a more specific name or use log_custom_food.`);
-      }
-      const r = remote[0];
-      food = await prisma.food.create({
-        data: {
-          fdcId: r.fdcId,
-          name: r.name,
-          brand: r.brand,
-          source: "USDA",
-          servingQty: r.servingQty,
-          servingUnit: r.servingUnit,
-          gramsPerServing: r.gramsPerServing,
-          calories: r.calories,
-          proteinG: r.proteinG,
-          carbsG: r.carbsG,
-          fatG: r.fatG,
-          fiberG: r.fiberG,
-          sugarG: r.sugarG,
-          sodiumMg: r.sodiumMg,
-        },
+    let foodId: string | undefined;
+    let foodName: string;
+
+    if (search.local?.length) {
+      foodId = search.local[0].id;
+      foodName = search.local[0].name;
+    } else if (search.remote?.length) {
+      const r = search.remote[0];
+      const created = await api<{ food: { id: string; name: string } }>("/api/foods", {
+        method: "POST",
+        body: JSON.stringify({ ...r, source: "USDA" }),
       });
+      foodId = created.food.id;
+      foodName = created.food.name;
+    } else {
+      return text(`No food found matching "${foodQuery}". Try a more specific name or use log_custom_food.`);
     }
 
-    const log = await prisma.mealLog.create({
-      data: {
-        userId: user.id,
-        date: new Date(day),
-        mealType,
-        foodId: food.id,
-        servings,
-        calories: food.calories * servings,
-        proteinG: food.proteinG * servings,
-        carbsG: food.carbsG * servings,
-        fatG: food.fatG * servings,
-      },
-    });
+    const logged = await api<{ log: { calories: number; proteinG: number; carbsG: number; fatG: number } }>(
+      "/api/meal-logs",
+      { method: "POST", body: JSON.stringify({ date: day, mealType, foodId, servings }) },
+    );
 
     return text(
-      `Logged ${servings}x ${food.name} for ${mealType.toLowerCase()} on ${day}: ${Math.round(log.calories)} kcal, P${Math.round(log.proteinG)}g C${Math.round(log.carbsG)}g F${Math.round(log.fatG)}g.`,
+      `Logged ${servings}x ${foodName} for ${mealType.toLowerCase()} on ${day}: ${Math.round(logged.log.calories)} kcal, P${Math.round(logged.log.proteinG)}g C${Math.round(logged.log.carbsG)}g F${Math.round(logged.log.fatG)}g.`,
     );
   },
 );
@@ -115,25 +147,16 @@ server.registerTool(
     },
   },
   async ({ name, mealType, calories, proteinG, carbsG, fatG, servings, date }) => {
-    const user = await getCurrentUser();
     const day = date ?? todayKey();
-    const food = await prisma.food.create({
-      data: { name, source: "CUSTOM", calories, proteinG, carbsG, fatG },
+    const created = await api<{ food: { id: string } }>("/api/foods", {
+      method: "POST",
+      body: JSON.stringify({ name, calories, proteinG, carbsG, fatG, source: "CUSTOM" }),
     });
-    const log = await prisma.mealLog.create({
-      data: {
-        userId: user.id,
-        date: new Date(day),
-        mealType,
-        foodId: food.id,
-        servings,
-        calories: calories * servings,
-        proteinG: proteinG * servings,
-        carbsG: carbsG * servings,
-        fatG: fatG * servings,
-      },
+    const logged = await api<{ log: { calories: number } }>("/api/meal-logs", {
+      method: "POST",
+      body: JSON.stringify({ date: day, mealType, foodId: created.food.id, servings }),
     });
-    return text(`Logged custom food "${name}" (${Math.round(log.calories)} kcal) for ${mealType.toLowerCase()} on ${day}.`);
+    return text(`Logged custom food "${name}" (${Math.round(logged.log.calories)} kcal) for ${mealType.toLowerCase()} on ${day}.`);
   },
 );
 
@@ -144,29 +167,8 @@ server.registerTool(
     inputSchema: { date: z.string().optional().describe("ISO date, defaults to today") },
   },
   async ({ date }) => {
-    const user = await getCurrentUser();
-    const day = date ?? todayKey();
-    const [logs, goal] = await Promise.all([
-      prisma.mealLog.findMany({ where: { userId: user.id, date: dayRange(day) } }),
-      prisma.goal.findFirst({ where: { userId: user.id, kind: "NUTRITION", active: true } }),
-    ]);
-    const totals = logs.reduce(
-      (acc, l) => ({
-        calories: acc.calories + l.calories,
-        proteinG: acc.proteinG + l.proteinG,
-        carbsG: acc.carbsG + l.carbsG,
-        fatG: acc.fatG + l.fatG,
-      }),
-      { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
-    );
-    return text({
-      date: day,
-      totals,
-      goal: goal
-        ? { calories: goal.targetCalories, proteinG: goal.targetProtein, carbsG: goal.targetCarbs, fatG: goal.targetFat }
-        : null,
-      mealsLogged: logs.length,
-    });
+    const data = await api(`/api/summary${date ? `?date=${date}` : ""}`);
+    return text(data);
   },
 );
 
@@ -182,18 +184,16 @@ server.registerTool(
     },
   },
   async ({ calories, proteinG, carbsG, fatG }) => {
-    const user = await getCurrentUser();
-    await prisma.goal.updateMany({ where: { userId: user.id, kind: "NUTRITION", active: true }, data: { active: false } });
-    await prisma.goal.create({
-      data: {
-        userId: user.id,
+    await api("/api/goals", {
+      method: "POST",
+      body: JSON.stringify({
         kind: "NUTRITION",
         name: "Daily Nutrition Target",
         targetCalories: calories,
         targetProtein: proteinG,
         targetCarbs: carbsG,
         targetFat: fatG,
-      },
+      }),
     });
     return text(`Nutrition goal set: ${calories} kcal, P${proteinG}g C${carbsG}g F${fatG}g per day.`);
   },
@@ -218,30 +218,36 @@ server.registerTool(
     },
   },
   async (args) => {
-    const user = await getCurrentUser();
     let { targetCalories, targetProtein, targetCarbs, targetFat } = args;
     if (!targetCalories || !targetProtein || !targetCarbs || !targetFat) {
-      const goal = await prisma.goal.findFirst({ where: { userId: user.id, kind: "NUTRITION", active: true } });
-      targetCalories ??= goal?.targetCalories ?? 2200;
-      targetProtein ??= goal?.targetProtein ?? 160;
-      targetCarbs ??= goal?.targetCarbs ?? 220;
-      targetFat ??= goal?.targetFat ?? 70;
+      const summary = await api<{ goal: { calories: number; proteinG: number; carbsG: number; fatG: number } | null }>(
+        "/api/summary",
+      );
+      targetCalories ??= summary.goal?.calories ?? 2200;
+      targetProtein ??= summary.goal?.proteinG ?? 160;
+      targetCarbs ??= summary.goal?.carbsG ?? 220;
+      targetFat ??= summary.goal?.fatG ?? 70;
     }
-    const meals = await generateMealPlan({
-      targetCalories,
-      targetProtein,
-      targetCarbs,
-      targetFat,
-      days: args.days,
-      mealsPerDay: args.mealsPerDay,
-      cuisine: args.cuisine,
-      maxMinutes: args.maxMinutes,
-      tags: args.tags,
-      ingredients: args.ingredients,
+
+    const data = await api<{ meals: PlannedMealResult[] }>("/api/meal-plan/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        targetCalories,
+        targetProtein,
+        targetCarbs,
+        targetFat,
+        days: args.days,
+        mealsPerDay: args.mealsPerDay,
+        cuisine: args.cuisine,
+        maxMinutes: args.maxMinutes,
+        tags: args.tags,
+        ingredients: args.ingredients,
+      }),
     });
+
     return text({
       targets: { targetCalories, targetProtein, targetCarbs, targetFat },
-      meals: meals.map((m) => ({
+      meals: data.meals.map((m) => ({
         day: m.day,
         mealType: m.mealType,
         recipe: m.recipe.name,
@@ -269,16 +275,17 @@ server.registerTool(
     },
   },
   async ({ query, muscle }) => {
-    const where: Prisma.ExerciseWhereInput = {};
-    if (query) where.name = { contains: query };
-    if (muscle) where.primaryMuscles = { contains: muscle };
-    const exercises = await prisma.exercise.findMany({ where, take: 15 });
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (muscle) params.set("muscle", muscle);
+    params.set("take", "15");
+    const data = await api<{ exercises: ExerciseResult[] }>(`/api/exercises?${params.toString()}`);
     return text(
-      exercises.map((e) => ({
+      data.exercises.map((e) => ({
         name: e.name,
         category: e.category,
         equipment: e.equipment,
-        primaryMuscles: JSON.parse(e.primaryMuscles),
+        primaryMuscles: e.primaryMuscles,
       })),
     );
   },
@@ -308,23 +315,21 @@ server.registerTool(
     },
   },
   async ({ name, date, exercises }) => {
-    const user = await getCurrentUser();
-    const setsData: {
-      exerciseId: string;
-      setNumber: number;
-      reps: number;
-      weightKg: number;
-      rpe?: number;
-      isWarmup: boolean;
-    }[] = [];
+    const setsData: { exerciseId: string; setNumber: number; reps: number; weightKg: number; rpe?: number; isWarmup: boolean }[] =
+      [];
     const notFound: string[] = [];
+    let matchedCount = 0;
 
     for (const block of exercises) {
-      const exercise = await prisma.exercise.findFirst({ where: { name: { contains: block.exerciseQuery } } });
+      const found = await api<{ exercises: { id: string }[] }>(
+        `/api/exercises?q=${encodeURIComponent(block.exerciseQuery)}&take=1`,
+      );
+      const exercise = found.exercises[0];
       if (!exercise) {
         notFound.push(block.exerciseQuery);
         continue;
       }
+      matchedCount++;
       block.sets.forEach((s, idx) => {
         setsData.push({ exerciseId: exercise.id, setNumber: idx + 1, ...s });
       });
@@ -334,18 +339,13 @@ server.registerTool(
       return text(`Couldn't match any exercises (${notFound.join(", ")}). Try search_exercises for the exact name.`);
     }
 
-    const log = await prisma.workoutLog.create({
-      data: {
-        userId: user.id,
-        name,
-        date: new Date(date ?? todayKey()),
-        sets: { create: setsData },
-      },
-      include: { sets: { include: { exercise: true } } },
+    const logged = await api<{ log: { name: string; sets: unknown[] } }>("/api/workout-logs", {
+      method: "POST",
+      body: JSON.stringify({ name, date: date ?? todayKey(), sets: setsData }),
     });
 
     return text(
-      `Logged "${log.name}" with ${log.sets.length} sets across ${exercises.length - notFound.length} exercises.` +
+      `Logged "${logged.log.name}" with ${logged.log.sets.length} sets across ${matchedCount} exercises.` +
         (notFound.length ? ` Skipped (not found): ${notFound.join(", ")}.` : ""),
     );
   },
@@ -358,21 +358,8 @@ server.registerTool(
     inputSchema: { days: z.number().default(7) },
   },
   async ({ days }) => {
-    const user = await getCurrentUser();
-    const since = new Date(Date.now() - days * 86400000);
-    const logs = await prisma.workoutLog.findMany({
-      where: { userId: user.id, date: { gte: since } },
-      include: { sets: { include: { exercise: true } } },
-    });
-    const sets: Record<string, number> = Object.fromEntries(MUSCLE_GROUPS.map((m) => [m, 0]));
-    for (const log of logs) {
-      for (const set of log.sets) {
-        if (set.isWarmup) continue;
-        for (const m of JSON.parse(set.exercise.primaryMuscles)) sets[m] += 1;
-        for (const m of JSON.parse(set.exercise.secondaryMuscles)) sets[m] += 0.5;
-      }
-    }
-    return text({ days, sets });
+    const data = await api(`/api/muscle-volume?days=${days}`);
+    return text(data);
   },
 );
 
@@ -387,11 +374,12 @@ server.registerTool(
     },
   },
   async ({ weightKg, bodyFatPct, date }) => {
-    const user = await getCurrentUser();
-    await prisma.bodyMetric.create({
-      data: { userId: user.id, date: new Date(date ?? todayKey()), weightKg, bodyFatPct },
+    const day = date ?? todayKey();
+    await api("/api/body-metrics", {
+      method: "POST",
+      body: JSON.stringify({ date: day, weightKg, bodyFatPct }),
     });
-    return text(`Logged body weight: ${weightKg}kg${bodyFatPct ? ` at ${bodyFatPct}% body fat` : ""} on ${date ?? todayKey()}.`);
+    return text(`Logged body weight: ${weightKg}kg${bodyFatPct ? ` at ${bodyFatPct}% body fat` : ""} on ${day}.`);
   },
 );
 

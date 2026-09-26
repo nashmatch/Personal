@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
 export interface MealPlanTargets {
@@ -49,6 +49,7 @@ export interface PlannedMeal {
 }
 
 export async function generateMealPlan(targets: MealPlanTargets) {
+  const prisma = await getPrisma();
   const where: Prisma.RecipeWhereInput = {};
   if (targets.cuisine && targets.cuisine !== "any") where.cuisine = targets.cuisine;
   if (targets.maxMinutes) where.totalMinutes = { lte: targets.maxMinutes };

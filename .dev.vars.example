@@ -1,0 +1,8 @@
+# Local secrets for `npm run preview` (wrangler dev). Copy to `.dev.vars`
+# (gitignored) and fill in — wrangler dev reads this file directly; it does
+# NOT read .env. For plain `next dev`, use .env instead (see .env.example).
+
+FDC_API_KEY=DEMO_KEY
+GOOGLE_SERVICE_ACCOUNT_EMAIL=
+GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY=
+GOOGLE_SHEET_ID=
